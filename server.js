@@ -64,6 +64,10 @@ import { boardData, GAME_CONFIG } from './game/properties.js';
 const app = express();
 app.use(cors());
 
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
