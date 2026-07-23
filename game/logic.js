@@ -90,7 +90,8 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
 
     if (tile.type === 'special') {
         if (tile.name === 'START') {
-            return { action: 'start', message: 'Landed directly on START!' };
+            player.money += GAME_CONFIG.PASS_GO_REWARD;
+            return { action: 'start', message: `Landed directly on START! Collected \u20b9${GAME_CONFIG.PASS_GO_REWARD}` };
         }
         if (tile.name === 'Go to prison') {
             player.position = 10; // Move to Jail tile (index 10)
@@ -162,6 +163,7 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
         player.money -= rentPaid;
         if (owner) {
             owner.money += rentPaid;
+            owner.rentCollected = (owner.rentCollected || 0) + rentPaid;
         }
 
         return {

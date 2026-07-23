@@ -197,6 +197,7 @@ io.on('connection', (socket) => {
         const startCash = Math.min(3000, Math.max(1000, parseInt(startingMoney) || 1500));
         if (!gameState[room]) {
             gameState[room] = {
+                roomCode: room, // Persistent room code!
                 players: {},
                 ownedProperties: {},
                 currentTurn: null,
@@ -209,8 +210,84 @@ io.on('connection', (socket) => {
                 vacationJackpot: 0,
                 trades: [],
                 gameStarted: false,
-                kickVotes: {}
+                kickVotes: {},
+                kickedPlayers: [],  // Track kicked/timed-out names -> spectator only
+                exitedPlayers: {}   // Track voluntarily exited players -> saved state for full rejoin
             };
+        }
+
+        // Check if player name is banned/kicked in this room (Spectator route)
+        const isKicked = gameState[room] && gameState[room].kickedPlayers && gameState[room].kickedPlayers.includes(playerName);
+        if (isKicked) {
+            socket.join(room);
+            logEvent(room, `👁️ ${playerName} joined the boardroom as a spectator.`);
+            io.to(room).emit('update_game', gameState[room]);
+            console.log(`Player ${socket.id} (${playerName}) joined room ${room} as spectator`);
+            return;
+        }
+
+        // Check if player voluntarily exited and is now rejoining (Full player restore)
+        const exitedState = gameState[room] && gameState[room].exitedPlayers && gameState[room].exitedPlayers[playerName];
+        if (exitedState) {
+            socket.join(room);
+
+            // Clear disconnect timer if any
+            if (disconnectTimers[exitedState.id]) {
+                clearTimeout(disconnectTimers[exitedState.id]);
+                delete disconnectTimers[exitedState.id];
+            }
+
+            // Restore player state under new socket ID
+            gameState[room].players[socket.id] = {
+                ...exitedState,
+                id: socket.id,
+                connected: true,
+                disconnectsAt: null,
+                exited: false
+            };
+
+            // Re-insert into turn order if not there
+            if (!gameState[room].turnOrder.includes(socket.id)) {
+                // Find old ID position and replace, or push to end
+                const oldIdx = gameState[room].turnOrder.indexOf(exitedState.id);
+                if (oldIdx !== -1) {
+                    gameState[room].turnOrder[oldIdx] = socket.id;
+                } else {
+                    gameState[room].turnOrder.push(socket.id);
+                }
+            }
+
+            // Remap currentTurn
+            if (gameState[room].currentTurn === exitedState.id) {
+                gameState[room].currentTurn = socket.id;
+            }
+
+            // Remap host
+            if (gameState[room].host === exitedState.id) {
+                gameState[room].host = socket.id;
+            }
+
+            // Remap owned properties
+            for (const propId in gameState[room].ownedProperties) {
+                if (gameState[room].ownedProperties[propId].owner === exitedState.id) {
+                    gameState[room].ownedProperties[propId].owner = socket.id;
+                }
+            }
+
+            // Remap trades
+            if (Array.isArray(gameState[room].trades)) {
+                gameState[room].trades.forEach(t => {
+                    if (t.senderId === exitedState.id) t.senderId = socket.id;
+                    if (t.targetId === exitedState.id) t.targetId = socket.id;
+                });
+            }
+
+            // Remove from exited list now that they've rejoined
+            delete gameState[room].exitedPlayers[playerName];
+
+            logEvent(room, `🔄 ${playerName} returned to the boardroom from their exit!`);
+            io.to(room).emit('update_game', gameState[room]);
+            return;
         }
 
         // Check if there is an existing player in this room with the same playerName (Reconnection)
@@ -221,7 +298,7 @@ io.on('connection', (socket) => {
             );
         }
 
-        if (existingPlayerId) {
+        if (existingPlayerId && gameState[room] && gameState[room].players[existingPlayerId]) {
             // Reconnection path!
             const oldPlayerState = gameState[room].players[existingPlayerId];
             
@@ -275,21 +352,29 @@ io.on('connection', (socket) => {
                     delete gameState[room].kickVotes[existingPlayerId];
                 }
                 for (const targetId in gameState[room].kickVotes) {
-                    gameState[room].kickVotes[targetId] = gameState[room].kickVotes[targetId].map(id => id === existingPlayerId ? socket.id : id);
+                    if (Array.isArray(gameState[room].kickVotes[targetId])) {
+                        gameState[room].kickVotes[targetId] = gameState[room].kickVotes[targetId].map(id => id === existingPlayerId ? socket.id : id);
+                    }
                 }
             }
 
             // 6. trades
-            gameState[room].trades.forEach(t => {
-                if (t.senderId === existingPlayerId) t.senderId = socket.id;
-                if (t.targetId === existingPlayerId) t.targetId = socket.id;
-            });
+            if (Array.isArray(gameState[room].trades)) {
+                gameState[room].trades.forEach(t => {
+                    if (t.senderId === existingPlayerId) t.senderId = socket.id;
+                    if (t.targetId === existingPlayerId) t.targetId = socket.id;
+                });
+            }
 
             logEvent(room, `🔌 ${playerName} reconnected to the board.`);
             io.to(room).emit('update_game', gameState[room]);
 
         } else if (!gameState[room].players[socket.id]) {
             // New player path!
+            if (gameState[room].turnOrder.length >= 6) {
+                socket.emit('error_msg', 'Room is full! Maximum 6 players allowed.');
+                return;
+            }
             const pName = playerName || `Player ${gameState[room].turnOrder.length + 1}`;
 
             // Check consumable winners database to award Rent Shield for one game only
@@ -311,6 +396,8 @@ io.on('connection', (socket) => {
                 color: getPlayerColor(gameState[room].turnOrder.length),
                 pawn: pawn,
                 rentShields: shields,
+                doublesStreak: 0,
+                rentCollected: 0,
                 connected: true
             };
             gameState[room].turnOrder.push(socket.id);
@@ -430,6 +517,11 @@ io.on('connection', (socket) => {
                         landingResult
                     });
 
+                    // Doubles jail escape grants an extra turn; reset streak
+                    player.doublesStreak = 0;
+                    roomState.hasRolled = false;
+                    logEvent(room, `🎲 Doubles! ${player.name} escaped Jail and gets to roll again!`);
+
                     io.to(room).emit('update_game', roomState);
                     checkBankruptcy(room, socket.id, creditorId);
                 } else {
@@ -502,8 +594,32 @@ io.on('connection', (socket) => {
             }
 
             // Normal movement roll
-            roomState.hasRolled = true;
             const diceResult = rollDice();
+            const isDoubles = diceResult.d1 === diceResult.d2;
+
+            // Track consecutive doubles streak
+            if (isDoubles) {
+                player.doublesStreak = (player.doublesStreak || 0) + 1;
+            } else {
+                player.doublesStreak = 0;
+            }
+
+            // Three consecutive doubles → sent to Jail!
+            if (player.doublesStreak >= 3) {
+                player.doublesStreak = 0;
+                player.position = 10;
+                player.inJail = true;
+                player.jailTurns = 0;
+                player.jailVisits = (player.jailVisits || 0) + 1;
+                roomState.hasRolled = true;
+                logEvent(room, `${player.name} rolled: ${diceResult.total} ([${diceResult.d1}] + [${diceResult.d2}]).`);
+                logEvent(room, `🚨 3 doubles in a row! ${player.name} is sent straight to Jail!`);
+                io.to(room).emit('dice_rolled', { player: socket.id, diceResult, landingResult: { action: 'jail', message: '3 doubles in a row — Sent to Jail!' } });
+                io.to(room).emit('update_game', roomState);
+                return;
+            }
+
+            roomState.hasRolled = true;
             logEvent(room, `${player.name} rolled: ${diceResult.total} ([${diceResult.d1}] + [${diceResult.d2}]).`);
 
             const movement = movePlayer(player.position, diceResult.total, player);
@@ -556,6 +672,12 @@ io.on('connection', (socket) => {
                 landingResult
             });
 
+            // Grant extra turn on doubles (unless player was sent to jail by landing)
+            if (isDoubles && !player.inJail && landingResult.action !== 'jail') {
+                roomState.hasRolled = false;
+                logEvent(room, `🎲 Doubles! ${player.name} gets to roll again!`);
+            }
+
             io.to(room).emit('update_game', roomState);
             checkBankruptcy(room, socket.id, creditorId);
         }
@@ -569,6 +691,10 @@ io.on('connection', (socket) => {
                 return;
             }
             if (roomState.currentTurn !== socket.id) return;
+            if (!roomState.hasRolled) {
+                socket.emit('error_msg', 'You must roll the dice before buying a property!');
+                return;
+            }
 
             const player = roomState.players[socket.id];
             const tile = boardData[player.position];
@@ -765,6 +891,10 @@ io.on('connection', (socket) => {
                 socket.emit('error_msg', "Cannot pay bail during an active auction!");
                 return;
             }
+            if (roomState.currentTurn !== socket.id) {
+                socket.emit('error_msg', "You can only pay bail on your own turn!");
+                return;
+            }
             const player = roomState.players[socket.id];
             if (player.inJail && player.money >= GAME_CONFIG.JAIL_BAIL_FINE) {
                 player.money -= GAME_CONFIG.JAIL_BAIL_FINE;
@@ -772,6 +902,7 @@ io.on('connection', (socket) => {
                 player.jailTurns = 0;
                 logEvent(room, `${player.name} paid ₹${GAME_CONFIG.JAIL_BAIL_FINE} bail fine to escape Jail!`);
                 io.to(room).emit('update_game', roomState);
+                checkBankruptcy(room, socket.id, 'bank');
             } else {
                 socket.emit('error_msg', "Cannot pay bail! Insufficient funds.");
             }
@@ -791,6 +922,10 @@ io.on('connection', (socket) => {
             }
 
             roomState.hasRolled = false;
+            // Reset doubles streak when the turn ends
+            if (roomState.players[socket.id]) {
+                roomState.players[socket.id].doublesStreak = 0;
+            }
 
             // Determine next index and check if that player has skipNextTurn active
             let currentIndex = roomState.turnOrder.indexOf(socket.id);
@@ -829,6 +964,14 @@ io.on('connection', (socket) => {
         if (roomState && roomState.players[socket.id] && roomState.players[targetPlayerId]) {
             if (roomState.auctionState) {
                 socket.emit('error_msg', "Cannot propose trade during an active auction!");
+                return;
+            }
+            if (roomState.players[socket.id].isBankrupt) {
+                socket.emit('error_msg', "Bankrupt players cannot propose trades!");
+                return;
+            }
+            if (roomState.players[targetPlayerId].isBankrupt) {
+                socket.emit('error_msg', "Cannot trade with a bankrupt player!");
                 return;
             }
             const sender = roomState.players[socket.id];
@@ -878,6 +1021,10 @@ io.on('connection', (socket) => {
             }
             const trade = roomState.trades.find(t => t.id === tradeId && t.status === 'active');
             if (trade) {
+                if (trade.targetId !== socket.id) {
+                    socket.emit('error_msg', "Only the intended recipient can accept this trade!");
+                    return;
+                }
                 const result = executeTrade(trade.senderId, trade.targetId, trade.offer, roomState);
                 if (result.success) {
                     trade.status = 'done';
@@ -927,15 +1074,10 @@ io.on('connection', (socket) => {
                 const tile = boardData[player.position];
                 const ownedProp = roomState.ownedProperties[tile.id];
                 if (ownedProp) {
-                    const ownerId = ownedProp.owner;
-                    const owner = roomState.players[ownerId];
                     const rent = calculateRent(tile.id, roomState);
-
+                    // Refund tenant from the bank — do NOT deduct from landlord
                     player.money += rent;
-                    if (owner) {
-                        owner.money -= rent;
-                    }
-                    logEvent(room, `🛡️ Rent of ₹${rent} refunded.`);
+                    logEvent(room, `🛡️ Rent of ₹${rent} refunded by the bank.`);
                 }
                 io.to(room).emit('update_game', roomState);
             }
@@ -951,6 +1093,15 @@ io.on('connection', (socket) => {
                 return;
             }
             const player = roomState.players[socket.id];
+            if (!player) return;
+            if (betAmount <= 0) {
+                socket.emit('error_msg', 'Bet amount must be greater than zero!');
+                return;
+            }
+            if (betAmount > player.money) {
+                socket.emit('error_msg', `Insufficient funds! You only have ₹${player.money}.`);
+                return;
+            }
             const outcome = Math.random() > 0.5 ? 'up' : 'down';
 
             roomState.stockGame.status = 'resolved';
@@ -1076,43 +1227,13 @@ io.on('connection', (socket) => {
                 logEvent(room, `🥾 KICKED! ${targetName} has been kicked by boardroom vote.`);
                 io.to(targetPlayerId).emit('kicked');
 
-                for (const propId in roomState.ownedProperties) {
-                    if (roomState.ownedProperties[propId].owner === targetPlayerId) {
-                        delete roomState.ownedProperties[propId];
-                    }
+                // Track in kickedPlayers to route them as spectators if they try to rejoin
+                if (!roomState.kickedPlayers) roomState.kickedPlayers = [];
+                if (!roomState.kickedPlayers.includes(targetName)) {
+                    roomState.kickedPlayers.push(targetName);
                 }
 
-                roomState.turnOrder = roomState.turnOrder.filter(id => id !== targetPlayerId);
-                delete roomState.players[targetPlayerId];
-                delete roomState.kickVotes[targetPlayerId];
-
-                const remaining = Object.keys(roomState.players);
-                if (remaining.length === 1) {
-                    const winnerId = remaining[0];
-                    const winner = roomState.players[winnerId];
-                    if (winner) {
-                        roomState.winner = winnerId;
-                        roomState.lastWinnerName = winner.name;
-                        logEvent(room, `🏆 MATCH OVER! ${winner.name} won!`);
-                        saveWinner(room, winner.name);
-                        io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
-                    }
-                } else if (remaining.length > 1) {
-                    if (roomState.currentTurn === targetPlayerId) {
-                        roomState.hasRolled = false;
-                        roomState.currentTurn = roomState.turnOrder[0];
-                        const nextPlayer = roomState.players[roomState.currentTurn];
-                        if (nextPlayer) {
-                            logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
-                        }
-                    }
-                } else {
-                    logEvent(room, `🏁 Game over! All players have been kicked.`);
-                    roomState.winner = null;
-                    io.to(room).emit('game_over', { winnerId: null, winnerName: 'Nobody' });
-                }
-
-                io.to(room).emit('update_game', roomState);
+                removePlayerImmediately(room, targetPlayerId);
             }
         }
     });
@@ -1125,6 +1246,12 @@ io.on('connection', (socket) => {
         
         const playerName = player.name;
         
+        // Add to kickedPlayers list (prevent active re-joins, allow spectating)
+        if (!roomState.kickedPlayers) roomState.kickedPlayers = [];
+        if (!roomState.kickedPlayers.includes(playerName)) {
+            roomState.kickedPlayers.push(playerName);
+        }
+
         // Clear property ownerships
         for (const propId in roomState.ownedProperties) {
             if (roomState.ownedProperties[propId].owner === playerId) {
@@ -1136,7 +1263,9 @@ io.on('connection', (socket) => {
         delete roomState.kickVotes?.[playerId];
         if (roomState.kickVotes) {
             for (const targetId in roomState.kickVotes) {
-                roomState.kickVotes[targetId] = roomState.kickVotes[targetId].filter(id => id !== playerId);
+                if (Array.isArray(roomState.kickVotes[targetId])) {
+                    roomState.kickVotes[targetId] = roomState.kickVotes[targetId].filter(id => id !== playerId);
+                }
             }
         }
 
@@ -1166,16 +1295,93 @@ io.on('connection', (socket) => {
                 delete auctionTimers[room];
             }
         } else {
-            if (roomState.currentTurn === playerId) {
-                roomState.currentTurn = roomState.turnOrder[0];
-                const nextPlayer = roomState.players[roomState.currentTurn];
-                if (nextPlayer) {
-                    logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+            // Check if only 1 player remains in the active game
+            const activePlayers = Object.keys(roomState.players);
+            if (roomState.gameStarted && activePlayers.length === 1) {
+                const winnerId = activePlayers[0];
+                const winner = roomState.players[winnerId];
+                if (winner) {
+                    roomState.winner = winnerId;
+                    roomState.lastWinnerName = winner.name;
+                    logEvent(room, `🏆 MATCH OVER! Everyone else left. ${winner.name} won!`);
+                    
+                    cleanPreviousWinnersOfMatch(roomState);
+                    saveWinner(winner.name);
+                    
+                    io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
+                }
+            } else {
+                if (roomState.currentTurn === playerId) {
+                    roomState.hasRolled = false;
+                    roomState.currentTurn = roomState.turnOrder[0];
+                    const nextPlayer = roomState.players[roomState.currentTurn];
+                    if (nextPlayer) {
+                        nextPlayer.doublesStreak = 0;
+                        logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+                    }
                 }
             }
             io.to(room).emit('update_game', roomState);
         }
     };
+
+    // Voluntary exit: pause player state, allow full rejoin later
+    socket.on('exit_game', (room) => {
+        const roomState = gameState[room];
+        if (!roomState || !roomState.players[socket.id]) return;
+
+        const player = roomState.players[socket.id];
+        const playerName = player.name;
+
+        // Save full player state under their name key
+        if (!roomState.exitedPlayers) roomState.exitedPlayers = {};
+        roomState.exitedPlayers[playerName] = {
+            ...player,
+            exited: true
+        };
+
+        // Remove from active turn order & players map
+        roomState.turnOrder = roomState.turnOrder.filter(id => id !== socket.id);
+        delete roomState.players[socket.id];
+
+        // Keep their property ownerships intact under old socket ID so they can reclaim on rejoin
+        // (remap happens in join_room exitedState block)
+
+        logEvent(room, `🚪 ${playerName} exited the boardroom. They can rejoin to continue.`);
+
+        // Handle turn progression if it was their turn
+        if (roomState.currentTurn === socket.id) {
+            roomState.hasRolled = false;
+            if (roomState.turnOrder.length > 0) {
+                roomState.currentTurn = roomState.turnOrder[0];
+                const nextPlayer = roomState.players[roomState.currentTurn];
+                if (nextPlayer) logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+            }
+        }
+
+        // Check if only 1 active player remains
+        const activePlayers = Object.keys(roomState.players);
+        if (roomState.gameStarted && activePlayers.length === 1) {
+            const winnerId = activePlayers[0];
+            const winner = roomState.players[winnerId];
+            if (winner) {
+                roomState.winner = winnerId;
+                roomState.lastWinnerName = winner.name;
+                logEvent(room, `🏆 MATCH OVER! Everyone else left. ${winner.name} won!`);
+                cleanPreviousWinnersOfMatch(roomState);
+                saveWinner(winner.name);
+                io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
+                return;
+            }
+        } else if (activePlayers.length === 0) {
+            delete gameState[room];
+        }
+
+        // Guard: room may have been deleted above
+        if (gameState[room]) {
+            io.to(room).emit('update_game', roomState);
+        }
+    });
 
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
@@ -1191,6 +1397,12 @@ io.on('connection', (socket) => {
                     // Game is in progress, give them 60 seconds reconnection window
                     roomState.players[socket.id].connected = false;
                     roomState.players[socket.id].disconnectsAt = Date.now() + 60000;
+
+                    // Clear stock market if this disconnected player was the active bettor
+                    if (roomState.stockGame && roomState.stockGame.playerId === socket.id) {
+                        roomState.stockGame = null;
+                        logEvent(room, `📉 Stock market cancelled — ${playerName} disconnected.`);
+                    }
                     
                     logEvent(room, `⚠️ ${playerName} disconnected. Reconnection window: 60s.`);
                     io.to(room).emit('update_game', roomState);
