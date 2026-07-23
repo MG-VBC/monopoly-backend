@@ -13,7 +13,8 @@ const WINNERS_FILE = path.join(__dirname, 'game', 'winners.json');
 const loadWinners = () => {
     try {
         if (fs.existsSync(WINNERS_FILE)) {
-            return JSON.parse(fs.readFileSync(WINNERS_FILE, 'utf8'));
+            const data = fs.readFileSync(WINNERS_FILE, 'utf8');
+            return data ? JSON.parse(data) : {};
         }
     } catch (err) {
         console.error("Failed to load winners file", err);
@@ -21,29 +22,55 @@ const loadWinners = () => {
     return {};
 };
 
-const saveWinner = (roomCode, winnerName) => {
+const saveWinner = (winnerName) => {
     try {
         const db = loadWinners();
-        db[roomCode] = { winnerName, timestamp: new Date().toISOString() };
+        if (db[winnerName]) {
+            db[winnerName].wins += 1;
+            db[winnerName].lastWin = new Date().toISOString();
+            db[winnerName].pendingShield = true;
+        } else {
+            db[winnerName] = { wins: 1, lastWin: new Date().toISOString(), pendingShield: true };
+        }
         fs.writeFileSync(WINNERS_FILE, JSON.stringify(db, null, 2), 'utf8');
+        console.log(`Saved winner: ${winnerName}`);
     } catch (err) {
         console.error("Failed to save winners file", err);
     }
 };
 
-const consumeWinner = (roomCode) => {
+const checkAndConsumeShield = (playerName) => {
     try {
         const db = loadWinners();
-        const record = db[roomCode];
-        if (record) {
-            delete db[roomCode];
+        if (db[playerName] && db[playerName].pendingShield) {
+            db[playerName].pendingShield = false;
             fs.writeFileSync(WINNERS_FILE, JSON.stringify(db, null, 2), 'utf8');
-            return record.winnerName;
+            return true;
         }
     } catch (err) {
-        console.error("Failed to consume winner record", err);
+        console.error("Failed to check and consume shield", err);
     }
-    return null;
+    return false;
+};
+
+const cleanPreviousWinnersOfMatch = (roomState) => {
+    try {
+        const db = loadWinners();
+        let changed = false;
+        if (roomState && roomState.players) {
+            Object.values(roomState.players).forEach(p => {
+                if (db[p.name] && !db[p.name].pendingShield) {
+                    delete db[p.name];
+                    changed = true;
+                }
+            });
+        }
+        if (changed) {
+            fs.writeFileSync(WINNERS_FILE, JSON.stringify(db, null, 2), 'utf8');
+        }
+    } catch (err) {
+        console.error("Failed to clean previous winners", err);
+    }
 };
 import {
     rollDice,
@@ -68,6 +95,17 @@ app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok' });
 });
 
+app.get('/room/:roomCode/pawns', (req, res) => {
+    const roomCode = req.params.roomCode.toUpperCase();
+    const roomState = gameState[roomCode];
+    if (roomState) {
+        const takenPawns = Object.values(roomState.players).map(p => p.pawn);
+        res.status(200).json({ takenPawns });
+    } else {
+        res.status(200).json({ takenPawns: [] });
+    }
+});
+
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
@@ -79,6 +117,7 @@ const io = new Server(server, {
 // Store room and player states
 const gameState = {};
 const auctionTimers = {};
+const disconnectTimers = {};
 
 // Helper to log game events
 const logEvent = (room, text) => {
@@ -131,9 +170,31 @@ io.on('connection', (socket) => {
         }
 
         if (!room) return;
+
+        // Verify if room exists and check rules
+        if (gameState[room]) {
+            if (gameState[room].gameStarted) {
+                const isReconnecting = Object.values(gameState[room].players).some(p => p.name === playerName);
+                if (!isReconnecting) {
+                    socket.emit('error_msg', "This match is already in progress!");
+                    return;
+                }
+            } else {
+                const isAlreadyJoined = Object.values(gameState[room].players).some(p => p.name === playerName);
+                if (!isAlreadyJoined) {
+                    const pawnTaken = Object.values(gameState[room].players).some(p => p.pawn === pawn);
+                    if (pawnTaken) {
+                        socket.emit('error_msg', `The pawn avatar ${pawn} is already chosen by another player in this room. Please select a different pawn.`);
+                        return;
+                    }
+                }
+            }
+        }
+
         socket.join(room);
 
         // First player joining this room becomes host and establishes settings
+        const startCash = Math.min(3000, Math.max(1000, parseInt(startingMoney) || 1500));
         if (!gameState[room]) {
             gameState[room] = {
                 players: {},
@@ -142,7 +203,7 @@ io.on('connection', (socket) => {
                 turnOrder: [],
                 log: [],
                 boardData,
-                startingMoney,
+                startingMoney: startCash,
                 hasRolled: false,
                 host: socket.id,
                 vacationJackpot: 0,
@@ -152,14 +213,89 @@ io.on('connection', (socket) => {
             };
         }
 
-        // Initialize player if not exists
-        if (!gameState[room].players[socket.id]) {
+        // Check if there is an existing player in this room with the same playerName (Reconnection)
+        let existingPlayerId = null;
+        if (gameState[room]) {
+            existingPlayerId = Object.keys(gameState[room].players).find(
+                (id) => gameState[room].players[id].name === playerName
+            );
+        }
+
+        if (existingPlayerId) {
+            // Reconnection path!
+            const oldPlayerState = gameState[room].players[existingPlayerId];
+            
+            // Map state to the new socket id
+            gameState[room].players[socket.id] = {
+                ...oldPlayerState,
+                id: socket.id,
+                connected: true,
+                disconnectsAt: null
+            };
+            
+            // Delete old socket id entry
+            if (existingPlayerId !== socket.id) {
+                delete gameState[room].players[existingPlayerId];
+            }
+
+            // Clear disconnect timer
+            if (disconnectTimers[existingPlayerId]) {
+                clearTimeout(disconnectTimers[existingPlayerId]);
+                delete disconnectTimers[existingPlayerId];
+            }
+
+            // Update references
+            // 1. turnOrder
+            const turnIdx = gameState[room].turnOrder.indexOf(existingPlayerId);
+            if (turnIdx !== -1) {
+                gameState[room].turnOrder[turnIdx] = socket.id;
+            }
+
+            // 2. currentTurn
+            if (gameState[room].currentTurn === existingPlayerId) {
+                gameState[room].currentTurn = socket.id;
+            }
+
+            // 3. host
+            if (gameState[room].host === existingPlayerId) {
+                gameState[room].host = socket.id;
+            }
+
+            // 4. ownedProperties owners
+            for (const propId in gameState[room].ownedProperties) {
+                if (gameState[room].ownedProperties[propId].owner === existingPlayerId) {
+                    gameState[room].ownedProperties[propId].owner = socket.id;
+                }
+            }
+
+            // 5. kickVotes
+            if (gameState[room].kickVotes) {
+                if (gameState[room].kickVotes[existingPlayerId]) {
+                    gameState[room].kickVotes[socket.id] = gameState[room].kickVotes[existingPlayerId];
+                    delete gameState[room].kickVotes[existingPlayerId];
+                }
+                for (const targetId in gameState[room].kickVotes) {
+                    gameState[room].kickVotes[targetId] = gameState[room].kickVotes[targetId].map(id => id === existingPlayerId ? socket.id : id);
+                }
+            }
+
+            // 6. trades
+            gameState[room].trades.forEach(t => {
+                if (t.senderId === existingPlayerId) t.senderId = socket.id;
+                if (t.targetId === existingPlayerId) t.targetId = socket.id;
+            });
+
+            logEvent(room, `🔌 ${playerName} reconnected to the board.`);
+            io.to(room).emit('update_game', gameState[room]);
+
+        } else if (!gameState[room].players[socket.id]) {
+            // New player path!
             const pName = playerName || `Player ${gameState[room].turnOrder.length + 1}`;
 
             // Check consumable winners database to award Rent Shield for one game only
             let shields = 0;
-            const lastWinner = consumeWinner(room);
-            if (lastWinner === pName) {
+            const hasShield = checkAndConsumeShield(pName);
+            if (hasShield) {
                 shields = 1;
                 logEvent(room, `🛡️ Last winner ${pName} starts with 1 Rent Shield!`);
             }
@@ -174,13 +310,14 @@ io.on('connection', (socket) => {
                 skipNextTurn: false,
                 color: getPlayerColor(gameState[room].turnOrder.length),
                 pawn: pawn,
-                rentShields: shields
+                rentShields: shields,
+                connected: true
             };
             gameState[room].turnOrder.push(socket.id);
             logEvent(room, `${pName} (${pawn}) joined the board.`);
+            io.to(room).emit('update_game', gameState[room]);
         }
 
-        io.to(room).emit('update_game', gameState[room]);
         console.log(`Player ${socket.id} (${playerName}) joined room ${room} with starting money ${gameState[room].startingMoney}`);
     });
 
@@ -206,11 +343,13 @@ io.on('connection', (socket) => {
 
             // Re-assign colors based on new turn order
             roomState.turnOrder.forEach((playerId, index) => {
-                roomState.players[playerId].color = getPlayerColor(index);
+                if (roomState.players[playerId]) {
+                    roomState.players[playerId].color = getPlayerColor(index);
+                }
             });
 
             logEvent(room, `🏁 GAME LAUNCHED! Host started the boardroom match.`);
-            logEvent(room, `🎲 Play order: ${roomState.turnOrder.map(id => roomState.players[id].name).join(' ➔ ')}`);
+            logEvent(room, `🎲 Play order: ${roomState.turnOrder.map(id => roomState.players[id]?.name || 'Unknown').join(' ➔ ')}`);
 
             io.to(room).emit('game_launched');
             io.to(room).emit('update_game', roomState);
@@ -655,23 +794,31 @@ io.on('connection', (socket) => {
 
             // Determine next index and check if that player has skipNextTurn active
             let currentIndex = roomState.turnOrder.indexOf(socket.id);
+            if (currentIndex === -1) currentIndex = 0;
+
             let nextIndex = (currentIndex + 1) % roomState.turnOrder.length;
             let nextPlayerId = roomState.turnOrder[nextIndex];
             let nextPlayer = roomState.players[nextPlayerId];
 
-            if (nextPlayer && nextPlayer.skipNextTurn) {
-                logEvent(room, `🌴 ${nextPlayer.name} is enjoying their Vacation and skips this round!`);
-                nextPlayer.skipNextTurn = false; // Reset the flag
-
-                // Proceed to the next player
+            let attempts = 0;
+            // Safely loop to skip missing or vacationing players (prevent null reference crashes)
+            while ((!nextPlayer || nextPlayer.skipNextTurn) && attempts < roomState.turnOrder.length) {
+                if (nextPlayer && nextPlayer.skipNextTurn) {
+                    logEvent(room, `🌴 ${nextPlayer.name} is enjoying their Vacation and skips this round!`);
+                    nextPlayer.skipNextTurn = false; // Reset the flag
+                }
                 nextIndex = (nextIndex + 1) % roomState.turnOrder.length;
                 nextPlayerId = roomState.turnOrder[nextIndex];
                 nextPlayer = roomState.players[nextPlayerId];
+                attempts++;
             }
 
-            roomState.currentTurn = nextPlayerId;
-
-            logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+            if (nextPlayer) {
+                roomState.currentTurn = nextPlayerId;
+                logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+            } else {
+                roomState.currentTurn = roomState.turnOrder[0] || null;
+            }
             io.to(room).emit('update_game', roomState);
         }
     });
@@ -686,6 +833,12 @@ io.on('connection', (socket) => {
             }
             const sender = roomState.players[socket.id];
             const receiver = roomState.players[targetPlayerId];
+
+            // Sanitize cash parameters in trade offers/requests to prevent NaN corruption
+            const offerCash = parseInt(offer.offerCash) || 0;
+            const requestCash = parseInt(offer.requestCash) || 0;
+            offer.offerCash = isNaN(offerCash) ? 0 : Math.max(0, offerCash);
+            offer.requestCash = isNaN(requestCash) ? 0 : Math.max(0, requestCash);
 
             const tradeId = `trade_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
             if (!roomState.trades) roomState.trades = [];
@@ -964,62 +1117,96 @@ io.on('connection', (socket) => {
         }
     });
 
+    const removePlayerImmediately = (room, playerId) => {
+        const roomState = gameState[room];
+        if (!roomState) return;
+        const player = roomState.players[playerId];
+        if (!player) return;
+        
+        const playerName = player.name;
+        
+        // Clear property ownerships
+        for (const propId in roomState.ownedProperties) {
+            if (roomState.ownedProperties[propId].owner === playerId) {
+                delete roomState.ownedProperties[propId];
+            }
+        }
+
+        // Clean kick votes
+        delete roomState.kickVotes?.[playerId];
+        if (roomState.kickVotes) {
+            for (const targetId in roomState.kickVotes) {
+                roomState.kickVotes[targetId] = roomState.kickVotes[targetId].filter(id => id !== playerId);
+            }
+        }
+
+        // Remove player
+        roomState.turnOrder = roomState.turnOrder.filter(id => id !== playerId);
+        delete roomState.players[playerId];
+
+        if (roomState.auctionState) {
+            const auction = roomState.auctionState;
+            if (auction.passes) {
+                auction.passes = auction.passes.filter(id => id !== playerId);
+            }
+            if (auction.highestBidder === playerId) {
+                auction.highestBidder = null;
+            }
+            if (checkEarlyAuctionFinish(room, roomState)) {
+                return;
+            }
+        }
+
+        logEvent(room, `${playerName} left the board.`);
+
+        if (roomState.turnOrder.length === 0) {
+            delete gameState[room];
+            if (auctionTimers[room]) {
+                clearTimeout(auctionTimers[room]);
+                delete auctionTimers[room];
+            }
+        } else {
+            if (roomState.currentTurn === playerId) {
+                roomState.currentTurn = roomState.turnOrder[0];
+                const nextPlayer = roomState.players[roomState.currentTurn];
+                if (nextPlayer) {
+                    logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+                }
+            }
+            io.to(room).emit('update_game', roomState);
+        }
+    };
+
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
         for (const room in gameState) {
             const roomState = gameState[room];
             if (roomState.players[socket.id]) {
                 const playerName = roomState.players[socket.id].name;
-
-                // Clear property ownerships
-                for (const propId in roomState.ownedProperties) {
-                    if (roomState.ownedProperties[propId].owner === socket.id) {
-                        delete roomState.ownedProperties[propId];
-                    }
-                }
-
-                // Clean kick votes
-                delete roomState.kickVotes?.[socket.id];
-                if (roomState.kickVotes) {
-                    for (const targetId in roomState.kickVotes) {
-                        roomState.kickVotes[targetId] = roomState.kickVotes[targetId].filter(id => id !== socket.id);
-                    }
-                }
-
-                // Remove player
-                roomState.turnOrder = roomState.turnOrder.filter(id => id !== socket.id);
-                delete roomState.players[socket.id];
-
-                if (roomState.auctionState) {
-                    const auction = roomState.auctionState;
-                    if (auction.passes) {
-                        auction.passes = auction.passes.filter(id => id !== socket.id);
-                    }
-                    if (auction.highestBidder === socket.id) {
-                        auction.highestBidder = null;
-                    }
-                    if (checkEarlyAuctionFinish(room, roomState)) {
-                        continue;
-                    }
-                }
-
-                logEvent(room, `${playerName} left the board.`);
-
-                if (roomState.turnOrder.length === 0) {
-                    delete gameState[room];
-                    if (auctionTimers[room]) {
-                        clearTimeout(auctionTimers[room]);
-                        delete auctionTimers[room];
-                    }
+                
+                // If game hasn't started yet, remove player immediately
+                if (!roomState.gameStarted) {
+                    removePlayerImmediately(room, socket.id);
                 } else {
-                    if (roomState.currentTurn === socket.id) {
-                        roomState.currentTurn = roomState.turnOrder[0];
-                        const nextPlayer = roomState.players[roomState.currentTurn];
-                        if (nextPlayer) {
-                            logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
-                        }
-                    }
+                    // Game is in progress, give them 60 seconds reconnection window
+                    roomState.players[socket.id].connected = false;
+                    roomState.players[socket.id].disconnectsAt = Date.now() + 60000;
+                    
+                    logEvent(room, `⚠️ ${playerName} disconnected. Reconnection window: 60s.`);
                     io.to(room).emit('update_game', roomState);
+                    
+                    const disconnectPlayerId = socket.id;
+                    const disconnectRoom = room;
+                    
+                    const timeout = setTimeout(() => {
+                        const rState = gameState[disconnectRoom];
+                        if (rState && rState.players[disconnectPlayerId] && !rState.players[disconnectPlayerId].connected) {
+                            logEvent(disconnectRoom, `⏰ Reconnection window expired. Kicking ${playerName} from the boardroom.`);
+                            removePlayerImmediately(disconnectRoom, disconnectPlayerId);
+                        }
+                    }, 60000);
+                    
+                    disconnectTimers[disconnectPlayerId] = timeout;
                 }
             }
         }
@@ -1225,8 +1412,8 @@ const finalizeBankruptcy = (room, bankruptPlayerId) => {
 
             logEvent(room, `🏆 MATCH OVER! ${winner.name} won!`);
 
-            saveWinner(room, winner.name);
-
+            cleanPreviousWinnersOfMatch(roomState);
+            saveWinner(winner.name);
             io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
         }
     } else if (remainingPlayers.length > 1) {
