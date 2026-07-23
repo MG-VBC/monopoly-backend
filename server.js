@@ -961,8 +961,8 @@ io.on('connection', (socket) => {
 
             if (player) {
                 if (direction === outcome) {
-                    player.money += betAmount;
-                    logEvent(room, `📈 STOCK WIN! ${player.name} predicted ${stock} would go ${direction.toUpperCase()} and won ₹${betAmount}!`);
+                    player.money += betAmount * 2;
+                    logEvent(room, `📈 STOCK WIN! ${player.name} predicted ${stock} would go ${direction.toUpperCase()} and won ₹${betAmount * 2}!`);
                 } else {
                     player.money -= betAmount;
                     logEvent(room, `📉 STOCK LOSS! ${player.name} predicted ${stock} would go ${direction.toUpperCase()} and lost ₹${betAmount}.`);
