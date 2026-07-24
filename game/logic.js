@@ -1,4 +1,4 @@
-import { boardData, getPropertiesByState, GAME_CONFIG, surpriseCards, treasureCards } from './properties.js';
+import { boardData, getPropertiesByState, GAME_CONFIG, AMENITY_CONFIG, surpriseCards, treasureCards } from './properties.js';
 
 // Roll two dice and return their separate values and total
 export const rollDice = () => {
@@ -81,6 +81,13 @@ export const calculateRent = (propertyId, gameStateRoom) => {
             rent = Math.ceil(rent * 1.1);
         }
 
+        // 🔌 Amenity Rent Bonuses
+        if (ownedProp.amenities) {
+            if (ownedProp.amenities.evCharging) rent += (AMENITY_CONFIG.evCharging?.rentBonus || 30);
+            if (ownedProp.amenities.rooftopSolar) rent += (AMENITY_CONFIG.rooftopSolar?.rentBonus || 40);
+            if (ownedProp.amenities.cellTower) rent += (AMENITY_CONFIG.cellTower?.rentBonus || 50);
+        }
+
         return rent;
     }
 
@@ -107,23 +114,31 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
             return { action: 'jail', message: 'Caught by police! Sent straight to Jail!' };
         }
         if (tile.name === 'GST Tax') {
-            const taxAmount = GAME_CONFIG.TAX_GST_AMOUNT;
+            const hasSolar = Object.values(gameStateRoom.ownedProperties || {}).some(p => p.owner === playerId && p.amenities?.rooftopSolar);
+            const baseTax = GAME_CONFIG.TAX_GST_AMOUNT;
+            const taxAmount = hasSolar ? Math.floor(baseTax * 0.5) : baseTax;
             player.money -= taxAmount;
             gameStateRoom.vacationJackpot = (gameStateRoom.vacationJackpot || 0) + taxAmount;
             return { 
                 action: 'tax', 
                 amount: taxAmount, 
-                message: `Paid GST Tax of ₹${taxAmount} (Accumulated in Vacation Pool: ₹${gameStateRoom.vacationJackpot})` 
+                message: hasSolar 
+                    ? `☀️ Solar Green Credit! GST Tax reduced to ₹${taxAmount} (Vacation Pool: ₹${gameStateRoom.vacationJackpot})`
+                    : `Paid GST Tax of ₹${taxAmount} (Accumulated in Vacation Pool: ₹${gameStateRoom.vacationJackpot})` 
             };
         }
         if (tile.name === 'Wealth Tax') {
-            const taxAmount = GAME_CONFIG.TAX_WEALTH_AMOUNT;
+            const hasSolar = Object.values(gameStateRoom.ownedProperties || {}).some(p => p.owner === playerId && p.amenities?.rooftopSolar);
+            const baseTax = GAME_CONFIG.TAX_WEALTH_AMOUNT;
+            const taxAmount = hasSolar ? Math.floor(baseTax * 0.5) : baseTax;
             player.money -= taxAmount;
             gameStateRoom.vacationJackpot = (gameStateRoom.vacationJackpot || 0) + taxAmount;
             return { 
                 action: 'tax', 
                 amount: taxAmount, 
-                message: `Paid Wealth Tax of ₹${taxAmount} (Accumulated in Vacation Pool: ₹${gameStateRoom.vacationJackpot})` 
+                message: hasSolar 
+                    ? `☀️ Solar Green Credit! Wealth Tax reduced to ₹${taxAmount} (Vacation Pool: ₹${gameStateRoom.vacationJackpot})`
+                    : `Paid Wealth Tax of ₹${taxAmount} (Accumulated in Vacation Pool: ₹${gameStateRoom.vacationJackpot})` 
             };
         }
         if (tile.name === 'Jail') {
@@ -258,6 +273,49 @@ export const buildHouse = (playerId, propertyId, gameStateRoom) => {
         success: true,
         houses: ownedProp.houses,
         message: `Upgraded ${propertyDef.name} for ₹${propertyDef.housePrice} (Houses: ${ownedProp.houses})`
+    };
+};
+
+// Buy unique property amenity (EV Charging, Rooftop Solar, 5G Cell Tower)
+export const buyAmenity = (playerId, propertyId, amenityType, gameStateRoom) => {
+    const propertyDef = boardData[propertyId];
+    const player = gameStateRoom.players[playerId];
+    const ownedProp = gameStateRoom.ownedProperties[propertyId];
+
+    if (!propertyDef || propertyDef.type !== 'property') {
+        return { success: false, message: 'Not a valid property tile' };
+    }
+    if (!player) return { success: false, message: 'Player not found' };
+    if (!ownedProp || ownedProp.owner !== playerId) {
+        return { success: false, message: 'You do not own this property' };
+    }
+    if (ownedProp.mortgaged) {
+        return { success: false, message: 'Cannot upgrade mortgaged property!' };
+    }
+
+    const config = AMENITY_CONFIG[amenityType];
+    if (!config) return { success: false, message: 'Invalid amenity type' };
+
+    if (!ownedProp.amenities) {
+        ownedProp.amenities = {};
+    }
+    if (ownedProp.amenities[amenityType]) {
+        return { success: false, message: `${config.name} is already installed on ${propertyDef.name}!` };
+    }
+
+    if (player.money < config.price) {
+        return { success: false, message: `Insufficient funds. ${config.name} costs ₹${config.price}` };
+    }
+
+    player.money -= config.price;
+    ownedProp.amenities[amenityType] = true;
+
+    return {
+        success: true,
+        amenityType,
+        name: config.name,
+        icon: config.icon,
+        message: `Installed ${config.icon} ${config.name} on ${propertyDef.name} for ₹${config.price}!`
     };
 };
 

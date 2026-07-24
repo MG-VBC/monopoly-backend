@@ -77,6 +77,7 @@ import {
     movePlayer,
     handlePlayerLanding,
     buildHouse,
+    buyAmenity,
     drawCard,
     sellProperty,
     sellHouse,
@@ -805,6 +806,43 @@ io.on('connection', (socket) => {
             const result = buildHouse(socket.id, propertyId, roomState);
             if (result.success) {
                 logEvent(room, `${roomState.players[socket.id].name} upgraded ${boardData[propertyId].name}. ${result.message}`);
+                const upgradeType = result.houses === 5 ? 'hotel' : 'house';
+                io.to(room).emit('property_upgraded', { propertyId, upgradeType, playerId: socket.id });
+                io.to(room).emit('update_game', roomState);
+            } else {
+                socket.emit('error_msg', result.message);
+            }
+        }
+    });
+
+    socket.on('buy_amenity', (data) => {
+        let room = "";
+        let propertyId = null;
+        let amenityType = null;
+        if (typeof data === 'object') {
+            room = data.room;
+            propertyId = data.propertyId;
+            amenityType = data.amenityType;
+        }
+
+        const roomState = gameState[room];
+        if (roomState && roomState.players[socket.id]) {
+            if (roomState.currentTurn !== socket.id) {
+                socket.emit('error_msg', "You can only perform property upgrades during your own active turn!");
+                return;
+            }
+            if (roomState.auctionState) {
+                socket.emit('error_msg', "Cannot upgrade during an active auction!");
+                return;
+            }
+            const result = buyAmenity(socket.id, propertyId, amenityType, roomState);
+            if (result.success) {
+                logEvent(room, `${roomState.players[socket.id].name} ${result.message}`);
+                let upgradeAnimType = 'ev';
+                if (amenityType === 'rooftopSolar') upgradeAnimType = 'solar';
+                if (amenityType === 'cellTower') upgradeAnimType = '5g';
+
+                io.to(room).emit('property_upgraded', { propertyId, upgradeType: upgradeAnimType, playerId: socket.id });
                 io.to(room).emit('update_game', roomState);
             } else {
                 socket.emit('error_msg', result.message);

@@ -8,6 +8,12 @@ export const GAME_CONFIG = {
     TAX_WEALTH_AMOUNT: 200     // Wealth Tax amount
 };
 
+export const AMENITY_CONFIG = {
+    evCharging: { name: 'EV Charging Station', icon: '⚡', price: 75, rentBonus: 30 },
+    rooftopSolar: { name: 'Rooftop Solar', icon: '☀️', price: 100, rentBonus: 40 },
+    cellTower: { name: '5G Cell Tower', icon: '📡', price: 150, rentBonus: 50 }
+};
+
 export const surpriseCards = [
     { text: '🎬 You won a Bollywood dance competition! Collect ₹200', amount: 200, action: 'add' },
     { text: '🛺 Auto-rickshaw reckless driving fine! Pay traffic police ₹100', amount: -100, action: 'deduct' },
