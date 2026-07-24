@@ -154,17 +154,39 @@ io.on('connection', (socket) => {
         }
     };
 
+    // ─── CHAT HANDLER ───
+    socket.on('chat_message', (data) => {
+        const { room, from, pawn, pawnColor, text } = data;
+        if (!room || !text || text.trim() === '') return;
+        const roomState = gameState[room];
+        if (!roomState) return;
+        if (!roomState.chat) roomState.chat = [];
+        const msg = {
+            id: Math.random().toString(36).substr(2, 9),
+            from: from || 'Unknown',
+            pawn: pawn || '📍',
+            pawnColor: pawnColor || '#94a3b8',
+            text: text.trim().substring(0, 200),
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+        roomState.chat.push(msg);
+        if (roomState.chat.length > 50) roomState.chat.shift();
+        io.to(room).emit('chat_message', msg);
+    });
+
     socket.on('join_room', (data) => {
         let room = "";
         let playerName = "";
         let startingMoney = 1500;
         let pawn = "🛺";
+        let pawnColor = '#94a3b8';
 
         if (typeof data === 'object' && data !== null) {
             room = data.room;
             playerName = data.playerName;
             startingMoney = parseInt(data.startingMoney) || 1500;
             pawn = data.pawn || "🛺";
+            pawnColor = data.pawnColor || '#94a3b8';
         } else {
             room = data;
         }
@@ -203,6 +225,7 @@ io.on('connection', (socket) => {
                 currentTurn: null,
                 turnOrder: [],
                 log: [],
+                chat: [],
                 boardData,
                 startingMoney: startCash,
                 hasRolled: false,
@@ -395,6 +418,7 @@ io.on('connection', (socket) => {
                 skipNextTurn: false,
                 color: getPlayerColor(gameState[room].turnOrder.length),
                 pawn: pawn,
+                pawnColor: pawnColor,
                 rentShields: shields,
                 doublesStreak: 0,
                 rentCollected: 0,
@@ -1679,7 +1703,42 @@ const finalizeBankruptcy = (room, bankruptPlayerId) => {
 
             cleanPreviousWinnersOfMatch(roomState);
             saveWinner(winner.name);
-            io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
+
+            // Build enriched leaderboard for winner screen
+            const winnersDb = loadWinners();
+            const allPlayersForLeaderboard = [
+                ...Object.values(roomState.players),
+                // Include bankrupt players stored in exitedPlayers/kicked if needed
+            ].map(p => {
+                // Compute net worth: cash + owned property values + house values
+                let propertyValue = 0;
+                for (const propId in roomState.ownedProperties) {
+                    if (roomState.ownedProperties[propId].owner === p.id) {
+                        const propDef = boardData[propId];
+                        if (propDef) {
+                            propertyValue += Math.floor(propDef.price / 2);
+                            const houses = roomState.ownedProperties[propId].houses || 0;
+                            if (propDef.housePrice) propertyValue += Math.floor(houses * propDef.housePrice / 2);
+                        }
+                    }
+                }
+                const propertiesOwned = Object.values(roomState.ownedProperties).filter(op => op.owner === p.id).length;
+                const allTimeWins = winnersDb[p.name]?.wins || 0;
+                return {
+                    id: p.id,
+                    name: p.name,
+                    pawn: p.pawn,
+                    pawnColor: p.pawnColor || '#94a3b8',
+                    color: p.color,
+                    cash: p.money,
+                    netWorth: p.money + propertyValue,
+                    propertiesOwned,
+                    rentCollected: p.rentCollected || 0,
+                    allTimeWins
+                };
+            }).sort((a, b) => b.netWorth - a.netWorth);
+
+            io.to(room).emit('game_over', { winnerId, winnerName: winner.name, leaderboard: allPlayersForLeaderboard });
         }
     } else if (remainingPlayers.length > 1) {
         if (roomState.currentTurn === bankruptPlayerId) {
