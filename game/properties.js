@@ -14,9 +14,9 @@ export const surpriseCards = [
     { text: '🥟 Hosted samosa party for your colony! Pay ₹50', amount: -50, action: 'deduct' },
     { text: '🌾 Bumper harvest on your Maharashtra farmland! Collect ₹150', amount: 150, action: 'add' },
     { text: '👮 Caught traveling without a ticket! Go straight to Jail.', amount: 0, action: 'go_to_jail' },
-    { text: '🏈 Won a gully cricket bet! Collect ₹75', amount: 75, action: 'add' },
+    { text: '🏏 Won a gully cricket bet! Collect ₹75', amount: 75, action: 'add' },
     { text: '📱 Your viral social media post earned ad revenue! Collect ₹125', amount: 125, action: 'add' },
-    { text: '🎨 Festival pandal decoration overrun! Pay ₹80', amount: -80, action: 'deduct' },
+    { text: '🎪 Festival pandal decoration overrun! Pay ₹80', amount: -80, action: 'deduct' },
     { text: '🚌 KSRTC bus delayed — refund voucher! Collect ₹30', amount: 30, action: 'add' },
     { text: '📺 Your startup featured on Shark Tank India! Collect ₹300', amount: 300, action: 'add' },
     { text: '💧 Water tanker bill unpaid by tenant — you cover it. Pay ₹60', amount: -60, action: 'deduct' },
@@ -29,7 +29,6 @@ export const surpriseCards = [
     { text: '🪁 Uttarayan kite festival earnings! Collect ₹110', amount: 110, action: 'add' },
     { text: '🚨 Tax raid on your property! Pay unexpected dues ₹200', amount: -200, action: 'deduct' },
     { text: '🎊 Relative\'s wedding cash envelope! Collect ₹250', amount: 250, action: 'add' },
-    // 20 new cards
     { text: '🥵 Bigg Boss double eviction — housemates fine you for hogging the loo! Pay ₹70', amount: -70, action: 'deduct' },
     { text: '☕ You opened a chai tapri outside an IT park. Daily orders flood in! Collect ₹160', amount: 160, action: 'add' },
     { text: '💸 Found a ₹500 note inside your old jeans after the demonetisation scare. Collect ₹500', amount: 500, action: 'add' },
@@ -73,7 +72,6 @@ export const treasureCards = [
     { text: '🧶 Handloom export subsidy from MSME! Collect ₹85', amount: 85, action: 'add' },
     { text: '🌊 Sea-facing plot rental income! Collect ₹145', amount: 145, action: 'add' },
     { text: '🛍️ GST refund on business purchases! Collect ₹75', amount: 75, action: 'add' },
-    // 20 new treasure cards
     { text: '🏆 IPL fantasy cricket jackpot winner! Collect ₹350', amount: 350, action: 'add' },
     { text: '📲 Zepto delivered wrong order — full cashback + bonus! Collect ₹60', amount: 60, action: 'add' },
     { text: '📞 Jio recharge refund for network outage week! Collect ₹40', amount: 40, action: 'add' },
@@ -101,9 +99,9 @@ export const boardData = [
     { id: 0, type: 'special', name: 'START', description: 'Collect ₹200 on passing', icon: '🏁' },
 
     // TOP ROW (Indices 1-9)
-    { id: 1, type: 'property', name: 'Vizag', state: 'Andhra Pradesh', color: '#8b5a2b', price: 300, baseRent: 28, housePrice: 200, icon: '🚢', houseIcon: '⛺', hotelIcon: '🛕' },
+    { id: 1, type: 'property', name: 'Vizag', state: 'Andhra Pradesh', color: '#8b5a2b', price: 60, baseRent: 6, housePrice: 50, icon: '🚢', houseIcon: '⛺', hotelIcon: '🛕' },
     { id: 2, type: 'special', name: 'Surprise', description: 'Draw a card', icon: '❓' },
-    { id: 3, type: 'property', name: 'Vijayawada', state: 'Andhra Pradesh', color: '#8b5a2b', price: 320, baseRent: 30, housePrice: 200, icon: '🌉', houseIcon: '⛺', hotelIcon: '🛕' },
+    { id: 3, type: 'property', name: 'Vijayawada', state: 'Andhra Pradesh', color: '#8b5a2b', price: 80, baseRent: 4, housePrice: 50, icon: '🌉', houseIcon: '⛺', hotelIcon: '🛕' },
     { id: 4, type: 'special', name: 'Stock Market', description: 'Real-time Stock Betting', icon: '📈' },
     { id: 5, type: 'airport', name: 'Kempegowda AP', state: 'Airports', color: '#7f8c8d', price: 200, baseRent: 25, icon: '✈️' },
     { id: 6, type: 'property', name: 'Pune', state: 'Maharashtra', color: '#e74c3c', price: 100, baseRent: 8, housePrice: 50, icon: '🎓', houseIcon: '🏠', hotelIcon: '🏰' },
@@ -143,10 +141,10 @@ export const boardData = [
     { id: 30, type: 'special', name: 'Go to Prison', description: 'Locked behind bars', icon: '👮' },
 
     // LEFT COLUMN (Indices 31-39)
-    { id: 31, type: 'property', name: 'Mangaluru', state: 'Karnataka', color: '#f1c40f', price: 60, baseRent: 4, housePrice: 50, icon: '⚓', houseIcon: '🛖', hotelIcon: '🏛️' },
-    { id: 32, type: 'property', name: 'Mysuru', state: 'Karnataka', color: '#f1c40f', price: 60, baseRent: 4, housePrice: 50, icon: '🪵', houseIcon: '🛖', hotelIcon: '🏛️' },
+    { id: 31, type: 'property', name: 'Mangaluru', state: 'Karnataka', color: '#f1c40f', price: 290, baseRent: 29, housePrice: 150, icon: '⚓', houseIcon: '🛖', hotelIcon: '🏛️' },
+    { id: 32, type: 'property', name: 'Mysuru', state: 'Karnataka', color: '#f1c40f', price: 300, baseRent: 30, housePrice: 150, icon: '🪵', houseIcon: '🛖', hotelIcon: '🏛️' },
     { id: 33, type: 'special', name: 'Treasure', description: 'Draw a card', icon: '🪙' },
-    { id: 34, type: 'property', name: 'Bengaluru', state: 'Karnataka', color: '#f1c40f', price: 80, baseRent: 6, housePrice: 50, icon: '💻', houseIcon: '🛖', hotelIcon: '🏛️' },
+    { id: 34, type: 'property', name: 'Bengaluru', state: 'Karnataka', color: '#f1c40f', price: 320, baseRent: 32, housePrice: 150, icon: '💻', houseIcon: '🛖', hotelIcon: '🏛️' },
     { id: 35, type: 'special', name: 'Surprise', description: 'Draw a card', icon: '❓' },
     { id: 36, type: 'airport', name: 'Netaji Subhash AP', state: 'Airports', color: '#7f8c8d', price: 200, baseRent: 25, icon: '✈️' },
     { id: 37, type: 'property', name: 'Panaji', state: 'Goa', color: '#16a085', price: 350, baseRent: 35, housePrice: 200, icon: '⛪', houseIcon: '⛪', hotelIcon: '⛵' },

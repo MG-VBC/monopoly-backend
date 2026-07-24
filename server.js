@@ -84,7 +84,12 @@ import {
     unmortgageProperty,
     calculateRent,
     executeTrade,
-    checkStateMonopoly
+    checkStateMonopoly,
+    takeLoan,
+    repayLoan,
+    chargeInterestOnLoans,
+    MAX_LOAN_AMOUNT,
+    LOAN_INTEREST_PER_TURN
 } from './game/logic.js';
 import { boardData, GAME_CONFIG } from './game/properties.js';
 
@@ -212,7 +217,10 @@ io.on('connection', (socket) => {
                 gameStarted: false,
                 kickVotes: {},
                 kickedPlayers: [],  // Track kicked/timed-out names -> spectator only
-                exitedPlayers: {}   // Track voluntarily exited players -> saved state for full rejoin
+                exitedPlayers: {},  // Track voluntarily exited players -> saved state for full rejoin
+                // Feature: VIP Status
+                vipPlayerId: null,
+                vipTurnsLeft: 0,
             };
         }
 
@@ -477,6 +485,14 @@ io.on('connection', (socket) => {
                     const movement = movePlayer(player.position, diceResult.total, player);
                     player.position = movement.newPosition;
 
+                    if (movement.passedGo) {
+                        logEvent(room, `🏁 ${player.name} passed START and collected ₹${GAME_CONFIG.PASS_GO_REWARD}! Balance: ₹${player.money}`);
+                        const interestCharged = chargeInterestOnLoans(socket.id, roomState);
+                        if (interestCharged > 0) {
+                            logEvent(room, `💳 ${player.name} paid ₹${interestCharged} loan interest on passing START.`);
+                        }
+                    }
+
                     const landingResult = handlePlayerLanding(socket.id, player.position, roomState);
                     let creditorId = null;
                     if (landingResult.action === 'rent_paid') {
@@ -537,6 +553,14 @@ io.on('connection', (socket) => {
                         // Move player
                         const movement = movePlayer(player.position, diceResult.total, player);
                         player.position = movement.newPosition;
+
+                        if (movement.passedGo) {
+                            logEvent(room, `🏁 ${player.name} passed START and collected ₹${GAME_CONFIG.PASS_GO_REWARD}! Balance: ₹${player.money}`);
+                            const interestCharged = chargeInterestOnLoans(socket.id, roomState);
+                            if (interestCharged > 0) {
+                                logEvent(room, `💳 ${player.name} paid ₹${interestCharged} loan interest on passing START.`);
+                            }
+                        }
 
                         const landingResult = handlePlayerLanding(socket.id, player.position, roomState);
                         let creditorId = 'bank';
@@ -627,6 +651,11 @@ io.on('connection', (socket) => {
 
             if (movement.passedGo) {
                 logEvent(room, `🏁 ${player.name} passed START and collected ₹${GAME_CONFIG.PASS_GO_REWARD}! Balance: ₹${player.money}`);
+                // 💳 LOAN INTEREST: Charge ₹50 per active loan on passing START
+                const interestCharged = chargeInterestOnLoans(socket.id, roomState);
+                if (interestCharged > 0) {
+                    logEvent(room, `💳 ${player.name} paid ₹${interestCharged} loan interest on passing START.`);
+                }
             }
 
             const landingResult = handlePlayerLanding(socket.id, player.position, roomState);
@@ -734,6 +763,17 @@ io.on('connection', (socket) => {
                         playerName: player.name,
                         playerPawn: player.pawn,
                         stateName: tile.state
+                    });
+
+                    // ⭐ VIP: Grant VIP status for the next 5 turns
+                    roomState.vipPlayerId = socket.id;
+                    roomState.vipTurnsLeft = 5;
+                    logEvent(room, `⭐ ${player.name} is now VIP! +10% rent bonus for the next 5 turns!`);
+                    io.to(room).emit('vip_awarded', {
+                        playerId: socket.id,
+                        playerName: player.name,
+                        playerPawn: player.pawn,
+                        turnsLeft: 5
                     });
                 }
 
@@ -927,6 +967,22 @@ io.on('connection', (socket) => {
                 roomState.players[socket.id].doublesStreak = 0;
             }
 
+
+
+            // ⭐ VIP: Decrement VIP turns at end of VIP player's own turn
+            if (roomState.vipPlayerId === socket.id && roomState.vipTurnsLeft > 0) {
+                roomState.vipTurnsLeft--;
+                if (roomState.vipTurnsLeft === 0) {
+                    const vipPlayer = roomState.players[roomState.vipPlayerId];
+                    logEvent(room, `⭐ VIP Status expired for ${vipPlayer?.name || 'Player'}!`);
+                    io.to(room).emit('vip_expired', { playerName: vipPlayer?.name || 'Player' });
+                    roomState.vipPlayerId = null;
+                } else {
+                    const vipPlayer = roomState.players[roomState.vipPlayerId];
+                    logEvent(room, `⭐ VIP ${vipPlayer?.name || 'Player'} has ${roomState.vipTurnsLeft} VIP turn(s) remaining.`);
+                }
+            }
+
             // Determine next index and check if that player has skipNextTurn active
             let currentIndex = roomState.turnOrder.indexOf(socket.id);
             if (currentIndex === -1) currentIndex = 0;
@@ -1109,6 +1165,60 @@ io.on('connection', (socket) => {
             isCounterOffer: true
         });
         io.to(room).emit('update_game', roomState);
+    });
+
+    // ============================================================
+    // 💳 BANK LOAN SYSTEM HANDLERS
+    // ============================================================
+    socket.on('take_loan', (data) => {
+        let room = "";
+        let amount = 500;
+        if (typeof data === 'object' && data !== null) {
+            room = data.room;
+            amount = parseInt(data.amount) || 500;
+        } else {
+            room = data;
+        }
+
+        const roomState = gameState[room];
+        if (!roomState || !roomState.players[socket.id]) return;
+        if (roomState.auctionState) {
+            socket.emit('error_msg', "Cannot take a loan during an active auction!");
+            return;
+        }
+        if (roomState.currentTurn !== socket.id) {
+            socket.emit('error_msg', "You can only take a loan on your turn!");
+            return;
+        }
+        const result = takeLoan(socket.id, amount, roomState);
+        if (result.success) {
+            const player = roomState.players[socket.id];
+            logEvent(room, `💳 ${player.name} took a bank loan of ₹${result.amount}. Interest: ₹${LOAN_INTEREST_PER_TURN}/turn.`);
+            io.to(room).emit('update_game', roomState);
+        } else {
+            socket.emit('error_msg', result.message);
+        }
+    });
+
+    socket.on('repay_loan', (room) => {
+        const roomState = gameState[room];
+        if (!roomState || !roomState.players[socket.id]) return;
+        if (roomState.auctionState) {
+            socket.emit('error_msg', "Cannot repay a loan during an active auction!");
+            return;
+        }
+        if (roomState.currentTurn !== socket.id) {
+            socket.emit('error_msg', "You can only repay a loan on your turn!");
+            return;
+        }
+        const result = repayLoan(socket.id, roomState);
+        if (result.success) {
+            const player = roomState.players[socket.id];
+            logEvent(room, `💳 ${player.name} repaid a bank loan of ₹${result.repayAmount}.`);
+            io.to(room).emit('update_game', roomState);
+        } else {
+            socket.emit('error_msg', result.message);
+        }
     });
 
     socket.on('use_rent_shield', (room) => {
@@ -1477,6 +1587,8 @@ io.on('connection', (socket) => {
         }
     });
 });
+
+
 
 const checkEarlyAuctionFinish = (room, roomState) => {
     const auction = roomState.auctionState;

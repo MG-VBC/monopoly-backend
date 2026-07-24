@@ -75,6 +75,12 @@ export const calculateRent = (propertyId, gameStateRoom) => {
             const mult = multipliers[houses] || multipliers[multipliers.length - 1];
             rent = propertyDef.baseRent * mult;
         }
+
+        // ⭐ VIP Bonus: +10% rent if the owner is currently VIP
+        if (gameStateRoom.vipPlayerId === ownerId && (gameStateRoom.vipTurnsLeft || 0) > 0) {
+            rent = Math.ceil(rent * 1.1);
+        }
+
         return rent;
     }
 
@@ -415,4 +421,83 @@ export const executeTrade = (playerAId, playerBId, tradeOffer, gameStateRoom) =>
     }
 
     return { success: true, message: "Swap executed!" };
+};
+
+// ============================================================
+// 💳 BANK LOAN SYSTEM
+// ============================================================
+export const MAX_LOAN_AMOUNT = 500;    // Maximum amount allowed per loan
+export const MAX_LOANS = 2;            // Max concurrent loans
+export const LOAN_INTEREST_PER_TURN = 50; // Interest charged each turn
+
+// Take a bank loan: credit manual amount (1 to MAX_LOAN_AMOUNT), register loan record
+export const takeLoan = (playerId, requestedAmount, gameStateRoom) => {
+    const player = gameStateRoom.players[playerId];
+    if (!player) return { success: false, message: 'Player not found' };
+
+    const amount = parseInt(requestedAmount);
+    if (isNaN(amount) || amount <= 0 || amount > MAX_LOAN_AMOUNT) {
+        return { success: false, message: `Loan amount must be between ₹1 and ₹${MAX_LOAN_AMOUNT}.` };
+    }
+
+    if (!player.loans) player.loans = [];
+    const activeLoans = player.loans.filter(l => !l.repaid);
+
+    if (activeLoans.length >= MAX_LOANS) {
+        return { success: false, message: `You already have ${MAX_LOANS} active loans. Repay one before taking another.` };
+    }
+
+    player.loans.push({ amount, interestAccrued: 0, repaid: false });
+    player.money += amount;
+
+    const totalOwed = activeLoans.reduce((s, l) => s + l.amount + l.interestAccrued, 0) + amount;
+    return {
+        success: true,
+        amount,
+        message: `Borrowed ₹${amount} from the bank. Total active debt: ₹${totalOwed}. Interest: ₹${LOAN_INTEREST_PER_TURN}/turn.`
+    };
+};
+
+// Repay the oldest active loan: deduct principal amount
+export const repayLoan = (playerId, gameStateRoom) => {
+    const player = gameStateRoom.players[playerId];
+    if (!player) return { success: false, message: 'Player not found' };
+    if (!player.loans || player.loans.length === 0) return { success: false, message: 'You have no loans to repay.' };
+
+    const loanIdx = player.loans.findIndex(l => !l.repaid);
+    if (loanIdx === -1) return { success: false, message: 'You have no active loans.' };
+
+    const loan = player.loans[loanIdx];
+    const repayAmount = loan.amount; // Principal only (interest was paid per turn)
+
+    if (player.money < repayAmount) {
+        return { success: false, message: `Insufficient funds. You need ₹${repayAmount} to repay this loan principal.` };
+    }
+
+    player.money -= repayAmount;
+    loan.repaid = true;
+
+    return {
+        success: true,
+        repayAmount,
+        message: `Repaid loan principal of ₹${repayAmount} to the bank. Interest charges stopped.`
+    };
+};
+
+// Charge interest on all active loans for a player (called each turn end)
+export const chargeInterestOnLoans = (playerId, gameStateRoom) => {
+    const player = gameStateRoom.players[playerId];
+    if (!player || !player.loans) return 0;
+
+    const activeLoans = player.loans.filter(l => !l.repaid);
+    if (activeLoans.length === 0) return 0;
+
+    let totalInterest = 0;
+    activeLoans.forEach(loan => {
+        loan.interestAccrued = (loan.interestAccrued || 0) + LOAN_INTEREST_PER_TURN;
+        totalInterest += LOAN_INTEREST_PER_TURN;
+    });
+
+    player.money -= totalInterest;
+    return totalInterest;
 };
