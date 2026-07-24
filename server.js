@@ -212,6 +212,7 @@ io.on('connection', (socket) => {
                 boardData,
                 startingMoney: startCash,
                 hasRolled: false,
+                canRollAgain: false,
                 host: socket.id,
                 vacationJackpot: 0,
                 trades: [],
@@ -289,6 +290,25 @@ io.on('connection', (socket) => {
                     if (t.senderId === exitedState.id) t.senderId = socket.id;
                     if (t.targetId === exitedState.id) t.targetId = socket.id;
                 });
+            }
+
+            // Remap vipPlayerId
+            if (gameState[room].vipPlayerId === exitedState.id) {
+                gameState[room].vipPlayerId = socket.id;
+            }
+
+            // Remap stockGame
+            if (gameState[room].stockGame && gameState[room].stockGame.playerId === exitedState.id) {
+                gameState[room].stockGame.playerId = socket.id;
+            }
+
+            // Remap auctionState
+            if (gameState[room].auctionState) {
+                const a = gameState[room].auctionState;
+                if (a.bankruptPlayerId === exitedState.id) a.bankruptPlayerId = socket.id;
+                if (a.highestBidder === exitedState.id) a.highestBidder = socket.id;
+                if (a.creditorId === exitedState.id) a.creditorId = socket.id;
+                if (Array.isArray(a.passes)) a.passes = a.passes.map(id => id === exitedState.id ? socket.id : id);
             }
 
             // Remove from exited list now that they've rejoined
@@ -373,6 +393,25 @@ io.on('connection', (socket) => {
                     if (t.senderId === existingPlayerId) t.senderId = socket.id;
                     if (t.targetId === existingPlayerId) t.targetId = socket.id;
                 });
+            }
+
+            // 7. vipPlayerId
+            if (gameState[room].vipPlayerId === existingPlayerId) {
+                gameState[room].vipPlayerId = socket.id;
+            }
+
+            // 8. stockGame
+            if (gameState[room].stockGame && gameState[room].stockGame.playerId === existingPlayerId) {
+                gameState[room].stockGame.playerId = socket.id;
+            }
+
+            // 9. auctionState
+            if (gameState[room].auctionState) {
+                const a = gameState[room].auctionState;
+                if (a.bankruptPlayerId === existingPlayerId) a.bankruptPlayerId = socket.id;
+                if (a.highestBidder === existingPlayerId) a.highestBidder = socket.id;
+                if (a.creditorId === existingPlayerId) a.creditorId = socket.id;
+                if (Array.isArray(a.passes)) a.passes = a.passes.map(id => id === existingPlayerId ? socket.id : id);
             }
 
             logEvent(room, `🔌 ${playerName} reconnected to the board.`);
@@ -464,11 +503,12 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            if (roomState.hasRolled) {
+            if (roomState.hasRolled && !roomState.canRollAgain) {
                 socket.emit('error_msg', "You have already rolled this turn!");
                 return;
             }
 
+            roomState.canRollAgain = false;
             const player = roomState.players[socket.id];
 
             // Handle player trapped in jail
@@ -536,7 +576,8 @@ io.on('connection', (socket) => {
 
                     // Doubles jail escape grants an extra turn; reset streak
                     player.doublesStreak = 0;
-                    roomState.hasRolled = false;
+                    roomState.hasRolled = true;
+                    roomState.canRollAgain = true;
                     logEvent(room, `🎲 Doubles! ${player.name} escaped Jail and gets to roll again!`);
 
                     io.to(room).emit('update_game', roomState);
@@ -704,8 +745,11 @@ io.on('connection', (socket) => {
 
             // Grant extra turn on doubles (unless player was sent to jail by landing)
             if (isDoubles && !player.inJail && landingResult.action !== 'jail') {
-                roomState.hasRolled = false;
+                roomState.hasRolled = true;
+                roomState.canRollAgain = true;
                 logEvent(room, `🎲 Doubles! ${player.name} gets to roll again!`);
+            } else {
+                roomState.canRollAgain = false;
             }
 
             io.to(room).emit('update_game', roomState);
@@ -1000,6 +1044,10 @@ io.on('connection', (socket) => {
             }
 
             roomState.hasRolled = false;
+            // Reset stock market game if active
+            if (roomState.stockGame) {
+                roomState.stockGame = null;
+            }
             // Reset doubles streak when the turn ends
             if (roomState.players[socket.id]) {
                 roomState.players[socket.id].doublesStreak = 0;
@@ -1119,10 +1167,73 @@ io.on('connection', (socket) => {
                     socket.emit('error_msg', "Only the intended recipient can accept this trade!");
                     return;
                 }
+                const statesToTrack = ['Andhra Pradesh', 'Maharashtra', 'Delhi', 'Gujarat', 'Tamil Nadu', 'Kerala', 'Karnataka', 'Goa'];
+                const senderPreMonopolies = statesToTrack.filter(s => checkStateMonopoly(trade.senderId, s, roomState));
+                const targetPreMonopolies = statesToTrack.filter(s => checkStateMonopoly(trade.targetId, s, roomState));
+
                 const result = executeTrade(trade.senderId, trade.targetId, trade.offer, roomState);
                 if (result.success) {
                     trade.status = 'done';
                     logEvent(room, `🤝 TRADE COMPLETE! ${trade.senderName} and ${trade.targetName} swapped assets.`);
+
+                    // Check post-trade monopoly statuses
+                    const senderPostMonopolies = statesToTrack.filter(s => checkStateMonopoly(trade.senderId, s, roomState));
+                    const targetPostMonopolies = statesToTrack.filter(s => checkStateMonopoly(trade.targetId, s, roomState));
+
+                    const senderNewMonopolies = senderPostMonopolies.filter(s => !senderPreMonopolies.includes(s));
+                    const targetNewMonopolies = targetPostMonopolies.filter(s => !targetPreMonopolies.includes(s));
+
+                    const senderGained = senderNewMonopolies.length > 0;
+                    const targetGained = targetNewMonopolies.length > 0;
+
+                    const sender = roomState.players[trade.senderId];
+                    const target = roomState.players[trade.targetId];
+
+                    if (senderGained) {
+                        senderNewMonopolies.forEach(stateName => {
+                            logEvent(room, `🏢 MONOPOLY ACHIEVED VIA TRADE! ${sender?.name || 'Player'} acquired all cities of ${stateName}!`);
+                            io.to(room).emit('monopoly_achieved', {
+                                playerName: sender?.name,
+                                playerPawn: sender?.pawn,
+                                stateName
+                            });
+                        });
+                    }
+
+                    if (targetGained) {
+                        targetNewMonopolies.forEach(stateName => {
+                            logEvent(room, `🏢 MONOPOLY ACHIEVED VIA TRADE! ${target?.name || 'Player'} acquired all cities of ${stateName}!`);
+                            io.to(room).emit('monopoly_achieved', {
+                                playerName: target?.name,
+                                playerPawn: target?.pawn,
+                                stateName
+                            });
+                        });
+                    }
+
+                    // ⭐ VIP Status Award:
+                    // If both gained a monopoly simultaneously in the trade, trade initiator (sender) gets priority VIP status!
+                    let vipWinnerId = null;
+                    if (senderGained && targetGained) {
+                        vipWinnerId = trade.senderId; // Sender (deal initiator) gets priority
+                    } else if (senderGained) {
+                        vipWinnerId = trade.senderId;
+                    } else if (targetGained) {
+                        vipWinnerId = trade.targetId;
+                    }
+
+                    if (vipWinnerId && roomState.players[vipWinnerId]) {
+                        const vipWinner = roomState.players[vipWinnerId];
+                        roomState.vipPlayerId = vipWinnerId;
+                        roomState.vipTurnsLeft = 5;
+                        logEvent(room, `⭐ ${vipWinner.name} is now VIP! +10% rent bonus for the next 5 turns!`);
+                        io.to(room).emit('vip_awarded', {
+                            playerId: vipWinnerId,
+                            playerName: vipWinner.name,
+                            playerPawn: vipWinner.pawn,
+                            turnsLeft: 5
+                        });
+                    }
 
                     io.to(room).emit('trade_completed', {
                         playerAName: trade.senderName,
@@ -1341,6 +1452,11 @@ io.on('connection', (socket) => {
             const player = roomState.players[socket.id];
             if (!player || player.isBankrupt) return;
 
+            if (auction.creditorId && socket.id === auction.creditorId) {
+                socket.emit('error_msg', "The creditor cannot participate in the auction for this debt!");
+                return;
+            }
+
             if (auction.passes && auction.passes.includes(socket.id)) {
                 socket.emit('error_msg', "You have already passed this auction and cannot bid again!");
                 return;
@@ -1365,6 +1481,8 @@ io.on('connection', (socket) => {
                 highestBidderName: player.name
             });
             io.to(room).emit('update_game', roomState);
+
+            checkEarlyAuctionFinish(room, roomState);
         }
     });
 
@@ -1385,6 +1503,10 @@ io.on('connection', (socket) => {
         if (roomState && roomState.auctionState) {
             const auction = roomState.auctionState;
             if (roomState.players[socket.id] && !roomState.players[socket.id].isBankrupt) {
+                if (auction.creditorId && socket.id === auction.creditorId) {
+                    socket.emit('error_msg', "The creditor cannot participate in the auction!");
+                    return;
+                }
                 if (!auction.passes) auction.passes = [];
                 if (!auction.passes.includes(socket.id)) {
                     auction.passes.push(socket.id);
@@ -1471,6 +1593,9 @@ io.on('connection', (socket) => {
         }
 
         // Remove player
+        const currentTurnIdx = roomState.turnOrder.indexOf(playerId);
+        const isTurnPlayer = (roomState.currentTurn === playerId);
+
         roomState.turnOrder = roomState.turnOrder.filter(id => id !== playerId);
         delete roomState.players[playerId];
 
@@ -1512,9 +1637,12 @@ io.on('connection', (socket) => {
                     io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
                 }
             } else {
-                if (roomState.currentTurn === playerId) {
+                if (isTurnPlayer) {
                     roomState.hasRolled = false;
-                    roomState.currentTurn = roomState.turnOrder[0];
+                    const nextIdx = (currentTurnIdx >= 0 && currentTurnIdx < roomState.turnOrder.length)
+                        ? currentTurnIdx
+                        : 0;
+                    roomState.currentTurn = roomState.turnOrder[nextIdx] || roomState.turnOrder[0] || null;
                     const nextPlayer = roomState.players[roomState.currentTurn];
                     if (nextPlayer) {
                         nextPlayer.doublesStreak = 0;
@@ -1541,6 +1669,9 @@ io.on('connection', (socket) => {
             exited: true
         };
 
+        const currentTurnIdx = roomState.turnOrder.indexOf(socket.id);
+        const isTurnPlayer = (roomState.currentTurn === socket.id);
+
         // Remove from active turn order & players map
         roomState.turnOrder = roomState.turnOrder.filter(id => id !== socket.id);
         delete roomState.players[socket.id];
@@ -1551,12 +1682,17 @@ io.on('connection', (socket) => {
         logEvent(room, `🚪 ${playerName} exited the boardroom. They can rejoin to continue.`);
 
         // Handle turn progression if it was their turn
-        if (roomState.currentTurn === socket.id) {
+        if (isTurnPlayer) {
             roomState.hasRolled = false;
             if (roomState.turnOrder.length > 0) {
-                roomState.currentTurn = roomState.turnOrder[0];
+                const nextIdx = (currentTurnIdx >= 0 && currentTurnIdx < roomState.turnOrder.length)
+                    ? currentTurnIdx
+                    : 0;
+                roomState.currentTurn = roomState.turnOrder[nextIdx] || roomState.turnOrder[0] || null;
                 const nextPlayer = roomState.players[roomState.currentTurn];
                 if (nextPlayer) logEvent(room, `It is now ${nextPlayer.name}'s turn.`);
+            } else {
+                roomState.currentTurn = null;
             }
         }
 
@@ -1632,7 +1768,12 @@ const checkEarlyAuctionFinish = (room, roomState) => {
     const auction = roomState.auctionState;
     if (!auction) return false;
 
-    const activeBidders = Object.keys(roomState.players).filter(id => !roomState.players[id].isBankrupt);
+    const activeBidders = Object.keys(roomState.players).filter(id => {
+        if (roomState.players[id].isBankrupt) return false;
+        if (auction.creditorId && id === auction.creditorId) return false;
+        return true;
+    });
+
     if (activeBidders.length === 0) {
         if (auctionTimers[room]) {
             clearTimeout(auctionTimers[room]);
@@ -1656,7 +1797,7 @@ const checkEarlyAuctionFinish = (room, roomState) => {
     }
 
     if (allPassed || allOthersPassed) {
-        logEvent(room, `⚡ Auction ended early: ${allPassed ? 'All players passed' : 'No other active bidders remaining'}.`);
+        logEvent(room, `⚡ Auction ended early: ${allPassed ? 'All eligible bidders passed' : 'No other active bidders remaining'}.`);
         if (auctionTimers[room]) {
             clearTimeout(auctionTimers[room]);
             delete auctionTimers[room];
@@ -1690,6 +1831,9 @@ const handleBankruptcy = (room, playerId, creditorId) => {
         .filter(propId => roomState.ownedProperties[propId].owner === playerId)
         .map(Number);
 
+    const currentTurnIdx = roomState.turnOrder.indexOf(playerId);
+    const isTurnPlayer = (roomState.currentTurn === playerId);
+
     player.isBankrupt = true;
     roomState.turnOrder = roomState.turnOrder.filter(id => id !== playerId);
 
@@ -1711,7 +1855,9 @@ const handleBankruptcy = (room, playerId, creditorId) => {
             highestBid: Math.min(100, dynamicStartingBid), // Lower starting bid to ensure it is bid-able
             highestBidder: null,
             bids: {},
-            endsAt: Date.now() + 30000 // Ends in 30 seconds
+            endsAt: Date.now() + 30000, // Ends in 30 seconds
+            isTurnPlayer: isTurnPlayer,
+            savedTurnIdx: currentTurnIdx
         };
         startNextAuction(room);
     } else {
@@ -1720,7 +1866,7 @@ const handleBankruptcy = (room, playerId, creditorId) => {
             roomState.players[creditorId].money += debtAmount;
             logEvent(room, `💸 Bank paid creditor ${roomState.players[creditorId].name} ₹${debtAmount} directly as ${player.name} went bankrupt with no assets.`);
         }
-        finalizeBankruptcy(room, playerId);
+        finalizeBankruptcy(room, playerId, isTurnPlayer, currentTurnIdx);
     }
 };
 
@@ -1747,6 +1893,9 @@ const startNextAuction = (room) => {
 
     // CRITICAL: Emit update_game so the clients render the full-screen auction modal immediately
     io.to(room).emit('update_game', roomState);
+
+    // If 0 active bidders exist (e.g. only creditor and bankrupt player in match), end early immediately
+    checkEarlyAuctionFinish(room, roomState);
 };
 
 const finishCurrentAuction = (room) => {
@@ -1797,14 +1946,13 @@ const finishCurrentAuction = (room) => {
         }
     }
 
-    finalizeBankruptcy(room, auction.bankruptPlayerId);
+    finalizeBankruptcy(room, auction.bankruptPlayerId, auction.isTurnPlayer, auction.savedTurnIdx);
     io.to(room).emit('update_game', roomState);
 };
 
-const finalizeBankruptcy = (room, bankruptPlayerId) => {
+const finalizeBankruptcy = (room, bankruptPlayerId, isTurnPlayer = false, currentTurnIdx = 0) => {
     const roomState = gameState[room];
     if (!roomState) return;
-    const player = roomState.players[bankruptPlayerId];
 
     delete roomState.players[bankruptPlayerId];
 
@@ -1832,9 +1980,12 @@ const finalizeBankruptcy = (room, bankruptPlayerId) => {
             io.to(room).emit('game_over', { winnerId, winnerName: winner.name });
         }
     } else if (remainingPlayers.length > 1) {
-        if (roomState.currentTurn === bankruptPlayerId) {
+        if (isTurnPlayer || roomState.currentTurn === bankruptPlayerId) {
             roomState.hasRolled = false;
-            roomState.currentTurn = roomState.turnOrder[0];
+            const nextIdx = (currentTurnIdx >= 0 && currentTurnIdx < roomState.turnOrder.length)
+                ? currentTurnIdx
+                : 0;
+            roomState.currentTurn = roomState.turnOrder[nextIdx] || roomState.turnOrder[0] || null;
             const nextPlayer = roomState.players[roomState.currentTurn];
             if (nextPlayer) {
                 logEvent(room, `It is now ${nextPlayer.name}'s turn.`);

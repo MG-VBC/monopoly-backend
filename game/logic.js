@@ -103,7 +103,6 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
 
     if (tile.type === 'special') {
         if (tile.name === 'START') {
-            player.money += GAME_CONFIG.PASS_GO_REWARD;
             return { action: 'start', message: `Landed directly on START! Collected \u20b9${GAME_CONFIG.PASS_GO_REWARD}` };
         }
         if (tile.name === 'Go to Prison') {
@@ -442,25 +441,35 @@ export const executeTrade = (playerAId, playerBId, tradeOffer, gameStateRoom) =>
         return { success: false, message: `${playerB.name} has insufficient cash.` };
     }
 
-    // Verify offered property ownerships
+    // Verify offered property ownerships and state group houses
     for (const propId of tradeOffer.offerProperties) {
         const owned = gameStateRoom.ownedProperties[propId];
         if (!owned || owned.owner !== playerAId) {
-            return { success: false, message: `${playerA.name} does not own the offered property ${boardData[propId].name}.` };
+            return { success: false, message: `${playerA.name} does not own the offered property ${boardData[propId]?.name || propId}.` };
         }
-        if (owned.houses > 0) {
-            return { success: false, message: `Cannot trade property ${boardData[propId].name} with upgrades built.` };
+        const tile = boardData[propId];
+        if (tile && tile.state) {
+            const stateProperties = getPropertiesByState(tile.state);
+            const hasHousesInState = stateProperties.some(p => (gameStateRoom.ownedProperties[p.id]?.houses || 0) > 0);
+            if (hasHousesInState) {
+                return { success: false, message: `Cannot trade ${tile.name}! Must sell all houses in ${tile.state} first.` };
+            }
         }
     }
 
-    // Verify requested property ownerships
+    // Verify requested property ownerships and state group houses
     for (const propId of tradeOffer.requestProperties) {
         const owned = gameStateRoom.ownedProperties[propId];
         if (!owned || owned.owner !== playerBId) {
-            return { success: false, message: `${playerB.name} does not own the requested property ${boardData[propId].name}.` };
+            return { success: false, message: `${playerB.name} does not own the requested property ${boardData[propId]?.name || propId}.` };
         }
-        if (owned.houses > 0) {
-            return { success: false, message: `Cannot trade property ${boardData[propId].name} with upgrades built.` };
+        const tile = boardData[propId];
+        if (tile && tile.state) {
+            const stateProperties = getPropertiesByState(tile.state);
+            const hasHousesInState = stateProperties.some(p => (gameStateRoom.ownedProperties[p.id]?.houses || 0) > 0);
+            if (hasHousesInState) {
+                return { success: false, message: `Cannot trade ${tile.name}! Must sell all houses in ${tile.state} first.` };
+            }
         }
     }
 

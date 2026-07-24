@@ -105,9 +105,9 @@ export const boardData = [
     { id: 0, type: 'special', name: 'START', description: 'Collect ₹200 on passing', icon: '🏁' },
 
     // TOP ROW (Indices 1-9)
-    { id: 1, type: 'property', name: 'Vizag', state: 'Andhra Pradesh', color: '#8b5a2b', price: 60, baseRent: 6, housePrice: 50, icon: '🚢', houseIcon: '⛺', hotelIcon: '🛕' },
+    { id: 1, type: 'property', name: 'Vizag', state: 'Andhra Pradesh', color: '#8b5a2b', price: 60, baseRent: 4, housePrice: 50, icon: '🚢', houseIcon: '⛺', hotelIcon: '🛕' },
     { id: 2, type: 'special', name: 'Surprise', description: 'Draw a card', icon: '❓' },
-    { id: 3, type: 'property', name: 'Vijayawada', state: 'Andhra Pradesh', color: '#8b5a2b', price: 80, baseRent: 4, housePrice: 50, icon: '🌉', houseIcon: '⛺', hotelIcon: '🛕' },
+    { id: 3, type: 'property', name: 'Vijayawada', state: 'Andhra Pradesh', color: '#8b5a2b', price: 80, baseRent: 6, housePrice: 50, icon: '🌉', houseIcon: '⛺', hotelIcon: '🛕' },
     { id: 4, type: 'special', name: 'Stock Market', description: 'Real-time Stock Betting', icon: '📈' },
     { id: 5, type: 'airport', name: 'Kempegowda AP', state: 'Airports', color: '#7f8c8d', price: 200, baseRent: 25, icon: '✈️' },
     { id: 6, type: 'property', name: 'Pune', state: 'Maharashtra', color: '#e74c3c', price: 100, baseRent: 8, housePrice: 50, icon: '🎓', houseIcon: '🏠', hotelIcon: '🏰' },
