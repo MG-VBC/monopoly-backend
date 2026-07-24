@@ -93,7 +93,7 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
             player.money += GAME_CONFIG.PASS_GO_REWARD;
             return { action: 'start', message: `Landed directly on START! Collected \u20b9${GAME_CONFIG.PASS_GO_REWARD}` };
         }
-        if (tile.name === 'Go to prison') {
+        if (tile.name === 'Go to Prison') {
             player.position = 10; // Move to Jail tile (index 10)
             player.inJail = true;
             player.jailTurns = 0;
@@ -131,7 +131,9 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
             return { 
                 action: 'vacation_jackpot', 
                 amount: jackpot, 
-                message: `🌴 Landed on Vacation! Collected the tax jackpot of ₹${jackpot} and will skip the next round!` 
+                message: jackpot > 0
+                    ? `🌴 ${player.name} landed on Vacation! Collected tax jackpot of ₹${jackpot} (Balance: ₹${player.money}). Will skip next round!`
+                    : `🌴 ${player.name} landed on Vacation. No jackpot yet — taking a break! Will skip next round.`
             };
         }
         if (tile.name === 'Surprise' || tile.name === 'Treasure') {
@@ -148,10 +150,10 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
     const ownedProp = gameStateRoom.ownedProperties[tile.id];
     if (!ownedProp) {
         // Available for purchase
-        return { action: 'buy_opportunity', price: tile.price, message: `${tile.name} is available to buy for ₹${tile.price}` };
+        return { action: 'buy_opportunity', price: tile.price, message: `🏡 ${tile.name} is unowned — available to buy for ₹${tile.price}` };
     } else if (ownedProp.owner !== playerId) {
         if (ownedProp.mortgaged) {
-            return { action: 'mortgaged_no_rent', message: `Landed on ${tile.name} (Mortgaged by owner, no rent paid!)` };
+            return { action: 'mortgaged_no_rent', message: `🏳️ ${player.name} landed on ${tile.name} (mortgaged, no rent paid!)` };
         }
 
         // Deduct rent
@@ -170,10 +172,10 @@ export const handlePlayerLanding = (playerId, position, gameStateRoom) => {
             action: 'rent_paid',
             rent: rentPaid,
             ownerId,
-            message: `Paid ₹${rentPaid} rent to ${owner ? owner.name : 'Owner'}`
+            message: `💸 ${player.name} paid ₹${rentPaid} rent to ${owner ? owner.name : 'Owner'} for ${tile.name}. (Balance: ₹${player.money})`
         };
     } else {
-        return { action: 'own_property', message: `Landed on your property: ${tile.name}` };
+        return { action: 'own_property', message: `📍 ${player.name} landed on their own property: ${tile.name}` };
     }
 };
 

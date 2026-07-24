@@ -500,11 +500,11 @@ io.on('connection', (socket) => {
 
                     if (landingResult.action === 'draw_card') {
                         const card = drawCard(socket.id, roomState, landingResult.type);
-                        logEvent(room, `${player.name} drew card: ${card.text}`);
+                        logEvent(room, `${player.name} drew a ${landingResult.type} card!`);
                         if (card.amount < 0) {
                             creditorId = 'bank';
                         }
-                        io.to(room).emit('card_drawn', { player: socket.id, card });
+                        io.to(socket.id).emit('card_drawn', { player: socket.id, card });
                     } else if (landingResult.action === 'stock_market') {
                         triggerStockMarket(room, socket.id, player);
                     } else if (landingResult.message) {
@@ -561,11 +561,11 @@ io.on('connection', (socket) => {
 
                         if (landingResult.action === 'draw_card') {
                             const card = drawCard(socket.id, roomState, landingResult.type);
-                            logEvent(room, `${player.name} drew card: ${card.text}`);
+                            logEvent(room, `${player.name} drew a ${landingResult.type} card!`);
                             if (card.amount < 0) {
                                 creditorId = 'bank';
                             }
-                            io.to(room).emit('card_drawn', { player: socket.id, card });
+                            io.to(socket.id).emit('card_drawn', { player: socket.id, card });
                         } else if (landingResult.action === 'stock_market') {
                             triggerStockMarket(room, socket.id, player);
                         } else if (landingResult.message) {
@@ -620,13 +620,13 @@ io.on('connection', (socket) => {
             }
 
             roomState.hasRolled = true;
-            logEvent(room, `${player.name} rolled: ${diceResult.total} ([${diceResult.d1}] + [${diceResult.d2}]).`);
+            logEvent(room, `🎲 ${player.name} rolled [${diceResult.d1}]+[${diceResult.d2}]=${diceResult.total}.`);
 
             const movement = movePlayer(player.position, diceResult.total, player);
             player.position = movement.newPosition;
 
             if (movement.passedGo) {
-                logEvent(room, `${player.name} passed START and collected ₹${GAME_CONFIG.PASS_GO_REWARD}.`);
+                logEvent(room, `🏁 ${player.name} passed START and collected ₹${GAME_CONFIG.PASS_GO_REWARD}! Balance: ₹${player.money}`);
             }
 
             const landingResult = handlePlayerLanding(socket.id, player.position, roomState);
@@ -652,11 +652,11 @@ io.on('connection', (socket) => {
 
             if (landingResult.action === 'draw_card') {
                 const card = drawCard(socket.id, roomState, landingResult.type);
-                logEvent(room, `${player.name} drew card: ${card.text}`);
+                logEvent(room, `${player.name} drew a ${landingResult.type} card!`);
                 if (card.amount < 0) {
                     creditorId = 'bank';
                 }
-                io.to(room).emit('card_drawn', {
+                io.to(socket.id).emit('card_drawn', {
                     player: socket.id,
                     card
                 });
@@ -1059,6 +1059,58 @@ io.on('connection', (socket) => {
         }
     });
 
+    // NEGOTIATE: receiver sends a counter-offer back to the original sender
+    socket.on('negotiate_trade', (data) => {
+        const { room, tradeId, counterOffer } = data;
+        const roomState = gameState[room];
+        if (!roomState || !roomState.trades) return;
+        if (roomState.auctionState) {
+            socket.emit('error_msg', 'Cannot negotiate during an active auction!');
+            return;
+        }
+        const trade = roomState.trades.find(t => t.id === tradeId && t.status === 'active');
+        if (!trade) return;
+        if (trade.targetId !== socket.id) {
+            socket.emit('error_msg', 'Only the trade recipient can send a counter-offer!');
+            return;
+        }
+        const negotiator = roomState.players[socket.id];
+        if (!negotiator) return;
+
+        // Sanitize counter-offer cash values
+        const offerCash = parseInt(counterOffer.offerCash) || 0;
+        const requestCash = parseInt(counterOffer.requestCash) || 0;
+        counterOffer.offerCash = Math.max(0, offerCash);
+        counterOffer.requestCash = Math.max(0, requestCash);
+
+        // Swap roles: negotiator becomes the new sender, original sender becomes the new target
+        const originalSenderId = trade.senderId;
+        const originalSenderName = trade.senderName;
+        const originalSenderPawn = trade.senderPawn;
+
+        trade.senderId = socket.id;
+        trade.senderName = negotiator.name;
+        trade.senderPawn = negotiator.pawn;
+        trade.targetId = originalSenderId;
+        trade.targetName = originalSenderName;
+        trade.targetPawn = originalSenderPawn;
+        trade.offer = counterOffer;
+        trade.isCounterOffer = true;
+
+        logEvent(room, `🔄 ${negotiator.name} sent a counter-offer to ${originalSenderName}!`);
+
+        // Notify the original sender that a counter-offer arrived
+        io.to(originalSenderId).emit('trade_proposed', {
+            tradeId: trade.id,
+            senderId: socket.id,
+            senderName: negotiator.name,
+            senderPawn: negotiator.pawn,
+            offer: counterOffer,
+            isCounterOffer: true
+        });
+        io.to(room).emit('update_game', roomState);
+    });
+
     socket.on('use_rent_shield', (room) => {
         const roomState = gameState[room];
         if (roomState && roomState.players[socket.id]) {
@@ -1102,7 +1154,8 @@ io.on('connection', (socket) => {
                 socket.emit('error_msg', `Insufficient funds! You only have ₹${player.money}.`);
                 return;
             }
-            const outcome = Math.random() > 0.5 ? 'up' : 'down';
+            // Strict 50/50 — pure coin flip
+            const outcome = Math.random() < 0.5 ? direction : (direction === 'up' ? 'down' : 'up');
 
             roomState.stockGame.status = 'resolved';
             roomState.stockGame.outcome = outcome;
